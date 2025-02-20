@@ -271,13 +271,17 @@ def add_order():
     except ValidationError as e:
         return jsonify(e.messages), 400
     
-    new_order = Orders(order_date=order_data['order_date'], customer_id = order_data['customer_id'])
+    customer = db.session.ge(Customer, order_data['customer_id'])
+    if customer:
+        new_order = Orders(order_date=order_data['order_date'], customer_id = order_data['customer_id'])
 
-    db.session.add(new_order)
-    db.session.commit()
+        db.session.add(new_order)
+        db.session.commit()
 
-    return jsonify({"Message": "New Order Placed!",
-                    "order": order_schema.dump(new_order)}), 201
+        return jsonify({"Message": "New Order Placed!",
+                        "order": order_schema.dump(new_order)}), 201
+    else:
+        return jsonify({"message": "Invalid customer id"}), 400
 
 #ADD ITEM TO ORDER
 @app.route('/orders/<int:order_id>/add_product/<int:product_id>', methods=['PUT'])
