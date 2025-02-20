@@ -22,8 +22,8 @@ from sqlalchemy import select, delete
 
 
 app = Flask(__name__) #creating and instance of our flask app
-                                                                #user pw     host      db
-app.config['SQLALCHEMY_DATABASE_URI'] = 'mysql+mysqlconnector://root:BAC146@localhost/ecomm_db'
+                                                                
+app.config['SQLALCHEMY_DATABASE_URI'] = 'sqlite:///app.db' #Students should use mysql
 
 class Base(DeclarativeBase):
     pass
@@ -31,28 +31,29 @@ class Base(DeclarativeBase):
 db = SQLAlchemy(app, model_class=Base)
 ma = Marshmallow(app)
 
+#====================== MODELS ==============================================
 
 class Customer(Base):
     __tablename__ = 'Customer' #Make your class name the same as your table name (trust me)
 
     #mapping class attributes to database table columns
     id: Mapped[int] = mapped_column(primary_key=True)
-    customer_name: Mapped[str] = mapped_column(db.String(200), nullable=False)
-    email: Mapped[str] = mapped_column(db.String(300))
-    phone: Mapped[str] = mapped_column(db.String(16))
+    name: Mapped[str] = mapped_column(db.String(225), nullable=False)
+    email: Mapped[str] = mapped_column(db.String(225))
+    address: Mapped[str] = mapped_column(db.String(225))
     #creating one-to-many relationship to Orders table
     orders: Mapped[List["Orders"]] = db.relationship(back_populates='customer') #back_populates insures that both ends of the relationship have access to the other
 
 order_products = db.Table(
     "Order_Products",
     Base.metadata, #Allows this table to locate the foreign keys from the other Base class
-    db.Column('order_id', db.ForeignKey('Orders.id'), primary_key=True),
-    db.Column('product_id', db.ForeignKey('Products.id'), primary_key=True)
+    db.Column('order_id', db.ForeignKey('orders.id')),
+    db.Column('product_id', db.ForeignKey('products.id'))
 )
 
 
 class Orders(Base):
-    __tablename__ = 'Orders'
+    __tablename__ = 'orders'
 
     id: Mapped[int] = mapped_column(primary_key=True)
     order_date: Mapped[date] = mapped_column(db.Date, nullable=False)
@@ -60,15 +61,16 @@ class Orders(Base):
     #creating a many-to-one relationship to Customer table
     customer: Mapped['Customer'] = db.relationship(back_populates='orders')
     #creating a many-to-many relationship to Products through or association table order_products
-    products: Mapped[List['Products']] = db.relationship(secondary=order_products)
+    products: Mapped[List['Products']] = db.relationship(secondary=order_products, back_populates="orders")
 
 class Products(Base):
-    __tablename__ = "Products"
+    __tablename__ = "products"
 
     id: Mapped[int] = mapped_column(primary_key=True)
     product_name: Mapped[str] = mapped_column(db.String(255), nullable=False )
     price: Mapped[float] = mapped_column(db.Float, nullable=False)
 
+    orders: Mapped[List['Orders']] = db.relationship(secondary=order_products, back_populates="products")
 
 #Initialize the database and create tables
 with app.app_context():
@@ -79,25 +81,22 @@ with app.app_context():
 
 
 
-#============================ CRUD OPERATIONS ==================================
+#============================ SCHEMAS ==================================
 
 #Defin Customer Schema
-class CustomerSchema(ma.Schema):
-    id = fields.Integer(required=False)
-    customer_name = fields.String(required=True)
-    email = fields.String(required=True)
-    phone = fields.String(required=True)
-
+class CustomerSchema(ma.SQLAlchemyAutoSchema): #SQLAlchemyAutoSchemas create schema fields based on the SQLALchemy model passed in
     class Meta:
-        fields = ('id', 'customer_name', 'email', 'phone')
+        model = Customer
 
-class ProductSchema(ma.Schema):
-    id = fields.Integer(required=False)
-    product_name = fields.String(required=True)
-    price = fields.Float(required=True)
-
+class ProductSchema(ma.SQLAlchemyAutoSchema):
     class Meta:
-        fields = ('id', 'product_name', 'price')
+        model = Products
+
+class OrderSchema(ma.SQLAlchemyAutoSchema):
+    class Meta:
+        model = Orders
+        include_fk = True #Need this because Auto Schemas don't automatically recognize foreign keys (customer_id)
+
 
 customer_schema = CustomerSchema()
 customers_schema = CustomerSchema(many= True)
@@ -105,7 +104,8 @@ customers_schema = CustomerSchema(many= True)
 product_schema = ProductSchema()
 products_schema = ProductSchema(many=True)
 
-
+order_schema = OrderSchema()
+orders_schema = OrderSchema(many=True)
 
 
 @app.route('/')
@@ -113,7 +113,7 @@ def home():
     return "If your are Lost welcome to the Sauce!"
 
 
-#====================Customer Interactions==========================
+#====================Customer CRUD==========================
 
 #Get all customers using a GET method
 @app.route("/customers", methods=['GET'])
@@ -127,7 +127,7 @@ def get_customers():
 @app.route("/customers/<int:id>", methods=['GET'])
 def get_customer(id):
     
-    query = select(Customer).filter(Customer.id == id)
+    query = select(Customer).where(Customer.id == id)
     result = db.session.execute(query).scalars().first() #first() grabs the first object return
 
     if result is None:
@@ -144,11 +144,12 @@ def add_customer():
     except ValidationError as e:
         return jsonify(e.messages), 400
 
-    new_customer = Customer(customer_name=customer_data['customer_name'], email=customer_data['email'], phone=customer_data['phone'])
+    new_customer = Customer(name=customer_data['name'], email=customer_data['email'], address=customer_data['address'])
     db.session.add(new_customer)
     db.session.commit()
 
-    return jsonify({"Message": "New Customer added successfully"}), 201
+    return jsonify({"Message": "New Customer added successfully",
+                    "customer": customer_schema.dump(new_customer)}), 201
 
 #Update a user with PUT request
 @app.route("/customers/<int:id>", methods=['PUT'])
@@ -156,21 +157,22 @@ def update_customer(id):
 
     query = select(Customer).where(Customer.id == id)
     result = db.session.execute(query).scalars().first()
-    if result is None:
+    if result is None: #Query the database for the user to see if this user even exists
         return jsonify({"Error": "Customer not found"}), 404
     
     customer = result
     
     try:
-        customer_data = customer_schema.load(request.json)
+        customer_data = customer_schema.load(request.json) #Load and validate incloming customer data
     except ValidationError as e:
-        return jsonify(e.messages), 400
+        return jsonify(e.messages), 400 #return error message if the data is invalid
     
-    for field, value in customer_data.items():
+    for field, value in customer_data.items(): #Go through customer data and set the attributes of the customer object
         setattr(customer, field, value)
 
-    db.session.commit()
-    return jsonify({"Message": "Customer details have been updated!"})
+    db.session.commit() #commit changes
+    return jsonify({"Message": "Customer details have been updated!",
+                    "customer": customer_schema.dump(customer)})
 
 #Delete a user with DELETE request
 @app.route("/customers/<int:id>", methods=['DELETE'])
@@ -186,11 +188,11 @@ def delete_customer(id):
     return jsonify({"Message": "Customer removed Successfully!"}), 200
 
 
-#====================Products Interactions==========================
+#====================Products CRUD==========================
 
 
 @app.route('/products', methods=['POST'])
-def add_product():
+def create_product():
     try:
         product_data = product_schema.load(request.json)
     except ValidationError as e:
@@ -200,24 +202,68 @@ def add_product():
     db.session.add(new_product)
     db.session.commit()
 
-    return jsonify({"Messages": "New Product added!"}), 201
+    return jsonify({"Messages": "New Product added!",
+                    "product": product_schema.dump(new_product)}), 201
+
+@app.route("/products", methods=['GET'])
+def get_products():
+    query = select(Products)
+    result = db.session.execute(query).scalars() #Exectute query, and convert row objects into scalar objects (python useable)
+    products = result.all() #packs objects into a list
+    return products_schema.jsonify(products)
+
+#Get Specific product using GET method and dynamic route
+@app.route("/products/<int:id>", methods=['GET'])
+def get_product(id):
+    
+    query = select(Products).where(Products.id == id)
+    result = db.session.execute(query).scalars().first() #first() grabs the first object return
+
+    if result is None:
+        return jsonify({"Error": "product not found"}), 404
+    
+    return product_schema.jsonify(result)
+
+#Update a user with PUT request
+@app.route("/products/<int:id>", methods=['PUT'])
+def update_product(id):
+
+    query = select(Products).where(Products.id == id)
+    result = db.session.execute(query).scalars().first()
+    if result is None: #Check if product to be updated exists
+        return jsonify({"Error": "product not found"}), 404
+    
+    product = result
+    
+    try:
+        product_data = product_schema.load(request.json) #validating data from incoming request
+    except ValidationError as e:  
+        return jsonify(e.messages), 400 #returning error message if data is invalid
+    
+    for field, value in product_data.items(): #updating specific product with product_data
+        setattr(product, field, value)
+
+    db.session.commit() #commiting changes
+    return jsonify({"Message": "product details have been updated!",
+                    "product": product_schema.dump(product)}), 200
+
+#Delete a product with DELETE request
+@app.route("/products/<int:id>", methods=['DELETE'])
+def delete_product(id):
+    product = db.session.get(Products, id) #Query product using primary key id.
+
+    if product:
+        db.session.delete(product) #delete product
+        db.session.commit() #save changes
+        return jsonify({"message": "Product successfully deleted"}), 200
+    return jsonify({"message": "Invlaid product id"}), 200
+    
+    
 
 
 
 #====================Order Operations================================
-
-class OrderSchema(ma.Schema):
-    id= fields.Integer(required=False)
-    order_date = fields.Date(required=False)
-    customer_id = fields.Integer(required=True)
-    
-    class Meta:
-        fields = ('id', 'order_date', 'customer_id', 'items') #items will be a list of product_ids
-
-
-order_schema = OrderSchema()
-orders_schema = OrderSchema(many=True)
-
+#CREATE an ORDER
 @app.route('/orders', methods=['POST'])
 def add_order():
     try:
@@ -225,28 +271,65 @@ def add_order():
     except ValidationError as e:
         return jsonify(e.messages), 400
     
-    new_order = Orders(order_date=date.today(), customer_id = order_data['customer_id'])
+    new_order = Orders(order_date=order_data['order_date'], customer_id = order_data['customer_id'])
 
-    for item_id in order_data['items']:
-        query = select(Products).filter(Products.id == item_id)
-        item = db.session.execute(query).scalar()
-        new_order.products.append(item)
-    
     db.session.add(new_order)
     db.session.commit()
 
-    return jsonify({"Message": "New Order Placed!"}), 201
+    return jsonify({"Message": "New Order Placed!",
+                    "order": order_schema.dump(new_order)}), 201
 
+#ADD ITEM TO ORDER
+@app.route('/orders/<int:order_id>/add_product/<int:product_id>', methods=['PUT'])
+def add_product(order_id, product_id):
+    order = db.session.get(Orders, order_id) #can use .get when querying using Primary Key
+    product = db.session.get(Products, product_id)
 
-@app.route("/order_items/<int:id>", methods=['GET'])
-def order_items(id):
-    query = select(Orders).filter(Orders.id == id)
-    order = db.session.execute(query).scalar()
-    return products_schema.jsonify(order.products)
+    if order and product: #check to see if both exist
+        if product not in order.products: #Ensure the product is not already on the order
+            order.products.append(product) #create relationship from order to product
+            db.session.commit() #commit changes to db
+            return jsonify({"Message": "Successfully added item to order."}), 200
+        else:#Product is in order.products
+            return jsonify({"Message": "Item is already included in this order."}), 400
+    else:#order or product does not exist
+        return jsonify({"Message": "Invalid order id or product id."}), 400
+    
 
+#REMOVE ITEM FROM ORDER
+@app.route('/orders/<int:order_id>/remove_product/<int:product_id>', methods=['DELETE'])
+def remove_product(order_id, product_id):
+    order = db.session.get(Orders, order_id) #can use .get when querying using Primary Key
+    product = db.session.get(Products, product_id)
 
+    if order and product: #check to see if both exist
+        if product in order.products: #Ensure the product is on the order
+            order.products.remove(product) #remove relationship from order to product
+            db.session.commit() #commit changes to db
+            return jsonify({"Message": "Successfully removed item from order."}), 200
+        else:#Product is not in order.products
+            return jsonify({"Message": "Item is not included in this order."}), 400
+    else:#order or product does not exist
+        return jsonify({"Message": "Invalid order id or product id."}), 400
+    
 
+#GET ORDER USING CUSTOMER ID
+@app.route("/orders/user/<int:customer_id>", methods=['GET'])
+def customer_orders(customer_id):
+    customer = db.session.get(Customer, customer_id)
 
+    if customer: #check if customer exists
+        return orders_schema.jsonify(customer.orders), 200 #using the customer's relationship attribute "orders" to return all associated orders
+    return jsonify({"message": "Invalid customer id."}), 400
+
+#Return all products on an order
+@app.route("/orders/<int:order_id>/products", methods=['GET'])
+def order_products(order_id):
+    order = db.session.get(Orders, order_id)
+
+    if order: #check if order exists
+        return products_schema.jsonify(order.products), 200 #using the order's relationship attribute "products" to return all associated products
+    return jsonify({"message": "Invalid order id."}), 400
 
 
 if __name__ == '__main__':
